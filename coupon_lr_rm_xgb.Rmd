@@ -1,0 +1,479 @@
+---
+title: "Coupon Usage Prediction Report"
+author: "YONG YANG"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: paged
+---
+
+# Overview
+
+This report utilizes the offline consumption dataset from Alibaba's O2O service to predict whether a user will use a coupon after receiving it. Given the large size of the dataset, which includes three parts online coupons, offline coupons, and user information I selected the relatively smaller offline dataset to accommodate my computer's performance limitations.
+
+In terms of data processing, I first handled missing values and generated new features based on the discount rates. Considering the significant imbalance between positive and negative samples, I employed methods to balance the samples during data splitting. I then sequentially applied logistic regression, random forest for classification predictions, introducing cross-validation to improve the models' predictive performance.
+
+
+# Dataset Download and Description
+
+from(https://tianchi.aliyun.com/dataset/137322?lang=en-us)
+This dataset provides real online and offline user consumption data from January 1, 2016 to June 30, 2016. Researchers are expected to predict the probability of customers redeeming a coupon within 15 days of receiving it.
+
+Note: To protect the privacy of users and merchants, data is desensitized and under biased sampling.
+
+Offline consumption & coupons Table（offline_train.csv.zip）
+
+| Field         | Description                                                                                                                                                               |
+|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| User_id       | User ID                                                                                                                                                                   |
+| Merchant_id   | Merchant ID                                                                                                                                                               |
+| Coupon_id     | Coupon ID, when Coupon_id = null, this means that a coupon has not been redeemed. In such case, Discount_rate and Date_received don't matter.                              |
+| Discount_rate | Discount rate, range in [0,1]                                                                                                                                              |
+| Distance      | 500x, the distance from the nearest shop around the user for locations in which a user is most active. x range in [0,10]; 0 – less than 500 meters; 10 – more than 5 kilometers. |
+| Date_received | Date the coupon is received                                                                                                                                               |
+| Date          | Purchase date. When Date=null & Coupon_id!= null, users receive coupon but don't redeem it; When Date!=null & Coupon_id= null, purchase happened but no coupon had been received; When Date!=null & Coupon_id!= null, 'Date' in which the coupon was used. |
+
+```{r }
+#install packages
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+#install.packages('tidyverse')
+#install.packages('lubridate')
+#install.packages('dplyr')
+#install.packages('tidyr')
+#install.packages('caret')
+#install.packages('ggplot2')
+#install.packages('ROSE')
+#install.packages('randomForest')
+#install.packages("xgboost")
+
+```
+
+```{r }
+#import packages
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(caret)
+```
+
+```{r }
+# Read the CSV file
+data <- read_csv("offline_train.csv")
+
+# Display the first 10 rows of the dataset
+view(head(data, 10))
+head(data, 10)
+```
+
+```{r }
+# Check for missing values in the Discount_rate column
+table(is.na(data$Discount_rate))
+
+# Display unique values in the Discount_rate column
+unique(data$Discount_rate)
+```
+
+```{r }
+# Replace "null" with NA in the Discount_rate column
+data$Discount_rate <- ifelse(data$Discount_rate == "null", NA, data$Discount_rate)
+
+# Recheck for missing values in the Discount_rate column
+table(is.na(data$Discount_rate))
+```
+
+```{r }
+# Recheck unique values in the Discount_rate column
+unique(data$Discount_rate)
+
+# Check for missing values in the Distance column
+table(is.na(data$Distance))
+
+# Display unique values in the Distance column
+unique(data$Distance)
+```
+
+```{r }
+# Replace "null" with NA in the Distance column
+data$Distance <- ifelse(data$Distance == "null", NA, data$Distance)
+
+# Recheck unique values in the Distance column
+unique(data$Distance)
+
+# Convert the Distance column to numeric
+data$Distance <- as.numeric(data$Distance)
+```
+
+```{r }
+# Plot a histogram of the Distance column
+ggplot(data, aes(x = Distance)) +
+  geom_histogram(bins = 20, color = "black", fill = "lightblue") +
+  labs(x = "Distance", y = "Frequency", title = "Histogram of Distance")
+```
+
+
+The proportion of missing values here is relatively small, 
+so it doesn't significantly impact the model. 
+Therefore, we'll fill in the missing values with the median.
+
+
+```{r }
+# Calculate the median of the Distance column
+median_distance <- median(data$Distance, na.rm = TRUE)
+
+# Fill missing values in the Distance column with the median
+data$Distance[is.na(data$Distance)] <- median_distance
+```
+
+```{r }
+# Check if the 'Date' and 'Date_received' columns are in date format
+class(data$Date)
+class(data$Date_received)
+
+# Display unique values in the Date and Date_received columns
+unique(data$Date)
+unique(data$Date_received)
+```
+
+```{r }
+#library(lubridate)
+
+# Convert the Date and Date_received columns to date format 
+data$Date <- ymd(data$Date)
+data$Date_received <- ymd(data$Date_received)
+
+# Check the conversion results for Date and Date_received
+unique(data$Date)
+unique(data$Date_received)
+
+# Recheck if the 'Date' and 'Date_received' columns are in date format
+class(data$Date)
+class(data$Date_received)
+```
+
+```{r }
+# Replace "null" with NA in the Coupon_id column
+data$Coupon_id <- ifelse(data$Coupon_id == "null", NA, data$Coupon_id)
+#unique(data$Coupon_id)
+table(is.na(data$Coupon_id))
+```
+
+```{r }
+# Check if both Coupon_id and Date_received columns are either both NA or both not NA
+data$both_null <- is.na(data$Coupon_id) & is.na(data$Date_received)
+
+# Count the rows where both columns are NA
+sum(data$both_null)
+
+# Count the rows where neither column is NA
+sum(!data$both_null)
+
+# Display the distribution of rows where both columns are NA or not
+table(data$both_null)
+```
+
+```{r }
+# Identify rows where one column is NA and the other is not
+data$one_null <- is.na(data$Coupon_id) != is.na(data$Date_received)
+
+# Count the rows where one column is NA and the other is not
+sum(data$one_null)
+```
+
+```{r }
+# Plot a bar chart showing the distribution of rows where both columns are NA or not
+ggplot(data, aes(x = both_null)) +
+  geom_bar(fill = "lightblue") +
+  labs(x = "Both Columns Null", y = "Count", title = "Distribution of Null Values")
+```
+
+```{r }
+# Specify the date format for the Date and Date_received columns
+data$Date <- as.Date(data$Date, format = "%Y-%m-%d")
+data$Date_received <- as.Date(data$Date_received, format = "%Y-%m-%d")
+```
+
+Remove all instances where CouponId is empty, 
+which means removing users who consumed directly without claiming a coupon. 
+Focus on users who consumed with coupons, 
+and examine the impact of coupons on user consumption.
+
+
+```{r }
+# Remove rows where Coupon_id is NA
+data <- data[!is.na(data$Coupon_id), ]
+view(head(data))
+head(data)
+
+# Display unique values in the Coupon_id column
+#unique(data$Coupon_id)
+table(is.na(data$Coupon_id))
+```
+
+```{r }
+# Display unique values in the Discount_rate column
+unique(data$Discount_rate)
+
+# Check the class (data type) of the Discount_rate column
+class(data$Discount_rate)
+```
+
+The original Discount_rate has two types of values: 
+'200:20' means 20 off for every 200 spent, and '0.8' means 20% off the original price. 
+Based on the Discount_rate column, generate four new feature columns: consumption threshold (discount_threshold), 
+discount amount (discount_amount), new discount rate (new_discount_rate), 
+and discount strength (discount_strength).
+
+```{r }
+
+library(dplyr)
+library(tidyr)
+
+
+# Generate features
+data <- data %>%
+  mutate(Discount_rate = as.character(Discount_rate)) %>%  # Ensure Discount_rate is of character type
+  separate(Discount_rate, c("discount_threshold", "discount_amount"), sep = ":", convert = TRUE, fill = "right") %>%
+  mutate(
+    discount_threshold = ifelse(is.na(discount_threshold), 0, discount_threshold),  # Fill NA with 0 in discount_threshold
+    discount_amount = ifelse(is.na(discount_amount), 0, discount_amount),  # Fill NA with 0 in discount_amount
+    new_discount_rate = ifelse(discount_threshold == 0, as.numeric(Discount_rate), 
+                               1 - discount_amount / discount_threshold),  # Calculate the new discount rate
+    discount_strength = 1 / new_discount_rate  # Calculate the discount strength
+  )
+```
+
+```{r }
+# View the processed data
+view(head(data))
+head(data)
+```
+
+```{r }
+# Check the transformation results
+glimpse(data)
+
+colnames(data)
+```
+
+```{r }
+# Determine if the coupon was used
+data <- data %>%
+  mutate(
+    Coupon_used = ifelse(!is.na(Coupon_id) & !is.na(Date), "Yes", "No")  
+  )
+
+colSums(is.na(data))
+
+str(data)
+```
+
+```{r }
+# Check the ratio of positive and negative samples
+table(data$Coupon_used)
+```
+
+```{r }
+# Select features
+X <- data[, c("discount_threshold", "discount_amount", "Distance", "new_discount_rate", "discount_strength")]
+
+# Select the target variable
+y <- factor(data$Coupon_used)
+
+head(X)
+head(y)
+
+glimpse(y)
+glimpse(X)
+table(y)
+summary(X)
+cor(X)
+```
+
+```{r }
+# Load machine learning packages
+library(caret)
+library(ROSE)
+library(ggplot2)
+```
+
+```{r }
+# Data splitting
+set.seed(42)
+train_index <- createDataPartition(y, p = 0.75, list = FALSE)
+X_train <- X[train_index, ]
+X_test <- X[-train_index, ]
+y_train <- y[train_index]
+y_test <- y[-train_index]
+```
+
+```{r }
+# Use the ROSE package for a combination of oversampling and undersampling
+balanced_data <- ROSE(Coupon_used ~ ., data = cbind(X_train, Coupon_used = y_train), seed = 42)$data
+X_resampled <- balanced_data[, !(names(balanced_data) %in% c("Coupon_used"))]
+y_resampled <- balanced_data$Coupon_used
+```
+
+# Logistic regression model
+
+```{r }
+
+# Convert Coupon_used to factor and specify the reference level
+balanced_data$Coupon_used <- factor(balanced_data$Coupon_used, levels = c("No", "Yes"))
+```
+
+```{r, eval.time=TRUE}
+# Train the logistic regression model
+log_reg <- glm(Coupon_used ~ ., data = balanced_data, family = binomial)
+
+# Make predictions on the test set
+y_pred_log <- predict(log_reg, newdata = X_test, type = "response")
+
+# Adjust the threshold according to specific needs, here using 0.5 as an example
+y_pred_log_class <- ifelse(y_pred_log > 0.5, "Yes", "No")
+```
+
+```{r }
+# Evaluate the logistic regression model performance
+# Use the confusionMatrix function from the caret package for comprehensive evaluation
+confusion_matrix <- confusionMatrix(data = as.factor(y_pred_log_class), reference = as.factor(y_test), positive = "Yes")
+print(confusion_matrix)
+```
+
+```{r }
+# Visualize the confusion matrix of logistic regression
+cm_log <- confusionMatrix(factor(y_pred_log_class), factor(y_test))
+ggplot(data = as.data.frame(cm_log$table),
+       aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%d", Freq))) +
+  scale_fill_gradient(low = "yellow", high = "purple") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix - Logistic Regression")
+
+```
+
+# Random Forest model
+
+```{r }
+# Load the randomForest library
+library(randomForest)
+```
+
+```{r, eval.time=TRUE}
+# Train a Random Forest model
+rf_model <- randomForest(
+  x = X_resampled, 
+  y = as.factor(y_resampled), 
+  ntree = 50,  
+  mtry = sqrt(ncol(X_resampled)),
+  importance = TRUE 
+)
+```
+
+```{r }
+# Predict on the test set using the trained Random Forest model
+rf_pred <- predict(rf_model, newdata = X_test)
+```
+
+```{r }
+# Evaluate the model performance using a confusion matrix
+confusionMatrix(as.factor(rf_pred), as.factor(y_test))
+
+# View feature importance from the Random Forest model
+importance(rf_model)
+varImpPlot(rf_model)
+```
+
+```{r }
+# Install and load the xgboost package
+#install.packages("xgboost")
+library(xgboost)
+```
+
+```{r }
+# Define model training control parameters
+ctrl <- trainControl(
+  method = "cv",           
+  number = 5,              # 5-fold cross-validation
+  search = "grid",         
+  verboseIter = TRUE,      
+  allowParallel = TRUE     
+)
+```
+
+```{r }
+# Define the grid of hyperparameters for XGBoost
+xgb_grid <- expand.grid(
+  nrounds = c(50, 100),    
+  max_depth = c(3, 6),     
+  eta = c(0.1, 0.3),       
+  gamma = 0,               
+  colsample_bytree = 0.8,  
+  min_child_weight = 1,    
+  subsample = 0.8          
+)
+```
+
+```{r, eval.time=TRUE}
+# Train the XGBoost model using the train function
+xgb_model <- train(
+  x = as.matrix(X_resampled),   
+  y = y_resampled,              
+  method = "xgbTree",           
+  trControl = ctrl,             
+  tuneGrid = xgb_grid,          
+  objective = "binary:logistic",
+  eval_metric = "auc",          
+  verbose = FALSE,              
+  nthread = parallel::detectCores() - 1 
+)
+```
+
+```{r }
+# Print the trained model and best hyperparameters
+print(xgb_model)
+print(xgb_model$bestTune)
+```
+
+```{r }
+# Make predictions on the test data
+xgb_pred <- predict(xgb_model, newdata = as.matrix(X_test))
+levels(xgb_pred)
+```
+
+```{r }
+# Optionally, convert predictions to numeric and display the first 10
+xgb_pred_numeric <- predict(xgb_model, newdata = as.matrix(X_test))
+head(xgb_pred_numeric, n = 10)
+
+# Convert numeric predictions to factors and calculate the confusion matrix
+xgb_pred_factor <- factor(xgb_pred_numeric, levels = c("No", "Yes"))
+cm <- table(Predicted = xgb_pred_factor, Actual = y_test)
+print(cm)
+```
+
+```{r }
+# Calculate and display feature importance
+importance <- varImp(xgb_model, scale = FALSE)
+print(importance)
+plot(importance)
+```
+
+
+
+# Conclusion
+
+This report aims to predict the likelihood of a user visiting a store after receiving a coupon, using multiple models. The results indicate that the models can accurately identify negative samples (coupons not used), but struggle with identifying positive samples (coupons used). The primary reason for this is the substantial imbalance between positive and negative samples, leading to suboptimal performance when handling imbalanced data.
+
+In practical applications, techniques such as sampling can be used to balance the positive and negative samples. If the original dataset exhibits a severe imbalance, it may be necessary to discard some data or seek higher-quality data sources. Additionally, due to computational performance constraints, I reduced the depth of trees in the random forest model and did not apply cross-validation, while in the XGBoost model, I also reduced the number of parameters and cross-validation rounds. If computational resources permit, increasing the complexity of these parameters could further enhance model performance.
+
+Overall, while the XGBoost model showed some improvement in identifying positive samples compared to the random forest, the improvement was not significant. However, both models outperformed the logistic regression model.
+
+# Future
+demonstrating better performance with more complex models.
+
+...
+
+**Data Source:** The dataset used in this report is from Alibaba's O2O service, available at [Tianchi](https://tianchi.aliyun.com/dataset/137322?lang=en-us).
+
